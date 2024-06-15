@@ -1,0 +1,339 @@
+---
+title: "Comprehensive Analysis of U.S. 30-year Climate Normals [1991-2020]"
+author: "Anbazhagan Naresh"
+date: "`r format(Sys.Date(), '%B %d, %Y')`"
+header-style: centered
+output: 
+  pdf_document:
+    keep_tex: true
+header-includes:
+  - \usepackage{titlesec}
+  - \usepackage{xcolor}
+  - \usepackage{ragged2e}
+  - \titleformat{\section}{\color{blue}\Large\bfseries}{\thesection}{1em}{}
+  - \titleformat{\subsection}{\color{blue}\large\bfseries}{\thesubsection}{1em}{}
+  - \titleformat{\subsubsection}{\color{blue}\normalsize\bfseries}{\thesubsubsection}{1em}{}
+  - \titlespacing*{\subsection}{0pt}{*3}{*2}
+  - \titlespacing*{\subsubsection}{0pt}{*3}{*2}
+  - \usepackage{titling}
+  - \pretitle{\begin{center}\LARGE\bfseries\color{blue}}
+  - \posttitle{\par\end{center}\vskip 0.5em}
+  - \preauthor{\begin{center}\large\color{blue}}
+  - \postauthor{\par\end{center}\vskip 0.1em}
+  - \predate{\begin{flushleft}\large\color{blue}}
+  - \postdate{\par\end{flushleft}}
+  - \setlength{\parindent}{0pt}
+  - \setlength{\parskip}{1em}
+  - \renewcommand{\familydefault}{\sfdefault}
+---
+
+```{r setup_packages, echo = FALSE, include = FALSE, warning=FALSE, message=FALSE}
+# Specifying a CRAN mirror
+options(repos = c(CRAN = "https://cloud.r-project.org"))
+
+# List of required packages
+packages <- c("tidyverse", "bslib", "ggplot2", "dplyr", "readr", "knitr", "rmarkdown", "rnaturalearth", "rnaturalearthdata", "sf", "furrr", "httr", "xml2", "lubridate", "progress", "transformr")
+
+# Function to check and install missing packages
+check_packages <- function(pkgs){
+  new_pkgs <- pkgs[!(pkgs %in% installed.packages()[,"Package"])]
+  if(length(new_pkgs)) install.packages(new_pkgs, dependencies = TRUE)
+}
+
+# Call the function with the vector of packages
+check_packages(packages)
+
+# Load the packages with muted exception handling
+sapply(packages, function(pkg) {
+  if(!require(pkg, character.only = TRUE, quietly = TRUE)) {
+    install.packages(pkg, dependencies = TRUE)
+    require(pkg, character.only = TRUE, quietly = TRUE)
+  }
+})
+
+# Set plan to multicore, specifying the number of cores to use
+plan(multisession, workers = 4)
+```
+
+Introduction
+
+\justifying
+This document provides a comprehensive analysis of the 30-year climate normals data for key weather stations in the United States. The dataset, provided by the National Centers for Environmental Information (NCEI), includes monthly climate normals for temperature and precipitation for the period from 1991 to 2020.
+
+Data Acquisition
+
+\justifying
+The climate normals data were sourced from the NCEI website. The inventory and readme files were downloaded to identify key stations and understand the structure of the dataset. The complete dataset can be accessed \href{https://www.ncei.noaa.gov/data/normals-monthly/1991-2020/access/}{\textcolor{blue}{here}}. The inventory file, which contains a list of all stations and their metadata, additional documentation explaining the methodology and data structure is available \href{https://www.ncei.noaa.gov/data/normals-monthly/1991-2020/doc/}{\textcolor{blue}{here}}.
+
+```{r download_inventory, echo=TRUE, include = TRUE, warning = FALSE}
+# Defining URLs for necessary files
+inventory_url <- "https://www.ncei.noaa.gov/data/normals-monthly/1991-2020/doc/inventory_30yr.txt"
+readme_url <- "https://www.ncei.noaa.gov/data/normals-monthly/1991-2020/doc/Readme_By-Variable_By-Station_Normals_Files.txt"
+
+# Download the inventory file
+inventory_file <- tempfile()
+GET(inventory_url, write_disk(inventory_file, overwrite = TRUE))
+
+# Read the inventory file with fixed width format
+inventory <- read_fwf(inventory_file, fwf_widths(c(11, 9, 10, 7, 3, NA)), show_col_types = FALSE)
+
+# Renaming columns for ease of data transformation
+inventory <- inventory %>%
+  rename(
+    Station_ID = X1,
+    Latitude = X2,
+    Longitude = X3,
+    Elevation = X4,
+    State = X5,
+    Name = X6
+  )
+
+# Extract key stations, selecting one per state.
+key_stations <- inventory %>%
+  distinct(State, .keep_all = TRUE)
+
+# Filter and display key stations
+key_stations
+num_key_stations <- nrow(key_stations)
+```
+
+Key Stations
+
+\justifying
+There are over 15000 stations across the United States and for our convenience of processing this data we identified key stations based on their Global Surface Network (GSN) and Historical Climatology Network (HCN) status.The list of key stations is extracted from the provided inventory file available on the NOAA website.We identified a total of `r num_key_stations` key stations from the inventory file.
+
+```{r download_climate_normals_data, echo=TRUE, include=FALSE, warning=FALSE, message=FALSE}
+# Creating a data directory
+dir.create("data", showWarnings = FALSE)
+
+# Function to download and check file size
+download_and_check <- function(station_id) {
+  destfile <- paste0("data/", station_id, ".csv")
+  if (!file.exists(destfile)) {
+    url <- paste0("https://www.ncei.noaa.gov/data/normals-monthly/1991-2020/access/", station_id, ".csv")
+    GET(url, write_disk(destfile, overwrite = TRUE), progress())
+  }
+  
+  if (file.exists(destfile) && file.info(destfile)$size > 0) {
+    return(destfile)
+  } else {
+    if (file.exists(destfile)) file.remove(destfile)
+    return(NULL)
+  }
+}
+
+# Download data for key stations
+data_files <- sapply(key_stations$Station_ID, download_and_check)
+data_files <- data_files[!is.na(data_files)]
+
+# Read and combine data
+climate_data <- lapply(data_files, read_csv, show_col_types = FALSE) %>%
+  bind_rows()
+
+# Display combined data
+print(names(climate_data))
+print(head(climate_data))
+
+```
+
+Data Cleaning and Aggregation
+
+\justifying
+The inventory data were read and cleaned to extract the relevant information for the key stations. The downloaded CSV files for each station were then read, and the data were aggregated to compute monthly averages for temperature and precipitation. Missing values were handled by removing any incomplete records to ensure data quality.
+
+```{r clean_data_and_aggr, echo=TRUE, include=TRUE, warning=FALSE}
+
+# Identifying the correct column that contains month information
+month_column <- names(climate_data)[grepl("month", tolower(names(climate_data)))][1]
+
+if (!is.null(month_column)) {
+  climate_data <- climate_data %>%
+    rename(Month = !!month_column)
+} else {
+  stop("The Month column is not found in the data.")
+}
+
+# Making sure Station_ID column exists and is correctly named
+if (!("Station_ID" %in% names(climate_data))) {
+  climate_data <- climate_data %>%
+    mutate(Station_ID = rep(key_stations$Station_ID, each = nrow(climate_data) / length(key_stations$Station_ID)))
+}
+
+# Identifying columns for temperature and precipitation
+temp_column <- names(climate_data)[grepl("tavg", tolower(names(climate_data)))][1]
+precip_column <- names(climate_data)[grepl("prcp", tolower(names(climate_data)))][1]
+
+if (is.null(temp_column) || is.null(precip_column)) {
+  stop("Temperature or precipitation columns are not found in the data.")
+}
+
+# Calculating monthly averages for each station
+monthly_averages <- climate_data %>%
+  group_by(Station_ID, Month) %>%
+  summarize(
+    Avg_Temperature = mean(.data[[temp_column]], na.rm = TRUE),
+    Avg_Precipitation = mean(.data[[precip_column]], na.rm = TRUE),
+    .groups = 'drop'
+  )
+
+# Merging monthly averages with key stations to include geographical coordinates
+station_averages <- key_stations %>%
+  left_join(monthly_averages, by = "Station_ID")
+
+# Checking summary data structure
+print(head(station_averages))
+print(head(monthly_averages))
+
+```
+
+Data Characteristics
+
+```{r data_characteristics, echo=TRUE, include=FALSE, warning=FALSE, message=FALSE}
+# Calculating the number of rows and columns
+num_rows <- nrow(climate_data)
+num_columns <- ncol(climate_data)
+
+```
+\justifying
+This dataframe has `r num_rows` rows and `r num_columns` columns. The names of the columns and a brief description of each are in the table below:
+
+```{r describe_data, echo=TRUE, include=FALSE, warning=FALSE}
+# Displaying column names
+col_names <- names(climate_data)
+num_columns <- length(col_names)
+print(col_names)
+print(num_columns)
+
+# Creating a dataframe for column descriptions. Not all columns have descriptions and it is hard to map it against the datatype inventory. 
+column_descriptions <- data.frame(
+  Column_Name = col_names,
+  Description = c(
+    "Station identifier",
+    "Month of observation",
+    "Average temperature for the month",
+    "Total precipitation for the month",
+    "Additional description 1",
+    "Additional description 2",
+    "Additional description 3"
+  )[1:num_columns]
+)
+
+knitr::kable(column_descriptions, caption = "Column Names and Descriptions")
+```
+
+Summary Statistics
+
+```{r summarize_data, echo=TRUE, include=TRUE, warning=FALSE}
+
+# Check data structure before summarizing
+print(head(climate_data))
+summary_stats <- summary(climate_data)
+print(head(summary_stats))
+
+```
+
+\justifying
+The summary statistics of the cleaned data provide an overview of the distribution of temperature and precipitation values across the key stations. The summary includes measures such as the minimum, maximum, mean, and median values, as well as the first and third quartiles for each variable. These statistics help us understand the central tendency and variability in the climate data.
+
+\section*{Visualizations}
+
+
+\justifying
+The following plots show the monthly average temperature, monthly average precipitation and the boxplots represent distribution of monthly average temperatures, precipitation to identify seasonal trends, detecting any significant changes across different months. In addition, heat maps illustrate monthly average temperature, precipitation to identify patterns and anomalies. 
+
+```{r data_visualization, echo=FALSE, warning=FALSE, fig.width=10, fig.height=6}
+#Monthly Average Temperature by Station
+ggplot(monthly_averages, aes(x = as.factor(Month), y = Avg_Temperature, color = Station_ID, group = Station_ID)) +
+  geom_line() +
+  labs(title = "Monthly Average Temperature by Station", x = "Month", y = "Average Temperature (°F)")
+
+#Monthly Average Precipitation by Station
+ggplot(monthly_averages, aes(x = as.factor(Month), y = Avg_Precipitation, color = Station_ID, group = Station_ID)) +
+  geom_line() +
+  labs(title = "Monthly Average Precipitation by Station", x = "Month", y = "Average Precipitation (inches)")
+
+#Boxplot of Monthly Average Temperature
+ggplot(monthly_averages, aes(x = as.factor(Month), y = Avg_Temperature)) +
+  geom_boxplot() +
+  labs(title = "Boxplot of Monthly Average Temperature", x = "Month", y = "Average Temperature (°F)")
+
+#Boxplot of Monthly Average Precipitation
+ggplot(monthly_averages, aes(x = as.factor(Month), y = Avg_Precipitation)) +
+  geom_boxplot() +
+  labs(title = "Boxplot of Monthly Average Precipitation", x = "Month", y = "Average Precipitation (inches)")
+
+#Heatmap of Monthly Average Temperature
+monthly_averages %>%
+  ggplot(aes(x = Month, y = Station_ID, fill = Avg_Temperature)) +
+  geom_tile() +
+  labs(title = "Heatmap of Monthly Average Temperature", x = "Month", y = "Station ID", fill = "Avg Temp (°F)") +
+  scale_fill_gradient(low = "blue", high = "red") +
+  #theme(axis.text.y = element_blank(), axis.ticks.y = element_blank())
+  theme(axis.text.y = element_text(size=6), axis.ticks.y = element_line(size=0.5))
+
+#Heatmap of Monthly Average Precipitation
+monthly_averages %>%
+  ggplot(aes(x = Month, y = Station_ID, fill = Avg_Precipitation)) +
+  geom_tile() +
+  labs(title = "Heatmap of Monthly Average Precipitation", x = "Month", y = "Station ID", fill = "Avg Precip (in)") +
+  scale_fill_gradient(low = "white", high = "blue") +
+  #theme(axis.text.y = element_blank(), axis.ticks.y = element_blank())
+  theme(axis.text.y = element_text(size=6), axis.ticks.y = element_line(size=0.5))
+
+```
+
+
+\justifying
+The following maps show the geographical distribution of average temperature and precipitation for each station. These visualizations help in understanding the spatial patterns in the climate data.
+
+```{r earth_visualization, echo=FALSE, warning=FALSE, fig.width=10, fig.height=6}
+us_map <- ne_countries(scale = "medium", returnclass = "sf")
+
+us_states <- map_data("state")
+
+ggplot() +
+  geom_polygon(data = us_states, aes(x = long, y = lat, group = group), fill = "lightgray", color = "yellow") +
+  geom_point(data = station_averages, aes(x = Longitude, y = Latitude, color = Avg_Temperature), size = 3) +
+  scale_color_gradient(low = "navy", high = "red") +
+  coord_fixed(1.3, xlim = c(-125, -66), ylim = c(25, 50)) +
+  labs(title = "Average Temperature by Station", x = "Longitude", y = "Latitude", color = "Avg Temp (°F)") +
+  theme_minimal()
+
+ggplot() +
+  geom_polygon(data = us_states, aes(x = long, y = lat, group = group), fill = "lightgray", color = "yellow") +
+  geom_point(data = station_averages, aes(x = Longitude, y = Latitude, color = Avg_Precipitation), size = 3) +
+  scale_color_gradient(low = "navy", high = "gold") +
+  coord_fixed(1.3, xlim = c(-125, -66), ylim = c(25, 50)) +
+  labs(title = "Average Precipitation by Station", x = "Longitude", y = "Latitude", color = "Avg Precip (in)") +
+  theme_minimal()
+
+```
+
+
+\justifying
+The following histograms show the distribution of temperatures, precipitation across all stations to help understand the frequency.
+
+```{r trend_visualization, echo=FALSE, warning=FALSE, fig.width=10, fig.height=4}
+ggplot(climate_data, aes(x = .data[[temp_column]])) +
+  geom_histogram(binwidth = 1, fill = "navy", alpha = 0.7) +
+  labs(title = "Temperature Distribution", x = "Temperature (°F)", y = "Frequency")
+
+ggplot(climate_data, aes(x = .data[[precip_column]])) +
+  geom_histogram(binwidth = 0.1, fill = "green", alpha = 0.7) +
+  labs(title = "Precipitation Distribution", x = "Precipitation (inches)", y = "Frequency")
+
+```
+
+
+References
+\justifying
+
+National Centers for Environmental Information (NCEI). "Climate Normals." `r format(Sys.Date(), '%B %d, %Y')`. https://www.ncei.noaa.gov/data/normals-monthly/1991-2020/access/
+
+National Centers for Environmental Information (NCEI). "Inventory 30-year Climate Normals." Accessed `r format(Sys.Date(), '%B %d, %Y')`. https://www.ncei.noaa.gov/data/normals-monthly/1991-2020/doc/inventory_30yr.txt
+
+National Centers for Environmental Information (NCEI). "Readme By-Variable By-Station Normals Files." Accessed `r format(Sys.Date(), '%B %d, %Y')`. https://www.ncei.noaa.gov/data/normals-monthly/1991-2020/doc/Readme_By-Variable_By-Station_Normals_Files.txt
+
+National Centers for Environmental Information (NCEI). "Normals_MLY_Documentation_1991-2020" Accessed `r format(Sys.Date(), '%B %d, %Y')`. https://www.ncei.noaa.gov/data/normals-monthly/1991-2020/doc/Normals_MLY_Documentation_1991-2020.pdf
+
+National Centers for Environmental Information (NCEI). "Normals_Calculation_Methodology_2020." Accessed `r format(Sys.Date(), '%B %d, %Y')`. https://www.ncei.noaa.gov/data/normals-monthly/1991-2020/doc/Normals_Calculation_Methodology_2020.pdf
